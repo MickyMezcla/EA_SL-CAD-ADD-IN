@@ -1,0 +1,433 @@
+(vl-load-com)
+
+(setq ct:fields
+  '(("b" "Width along X (mm)" "500")
+    ("h" "Length along Y (mm)" "500")
+    ("dc" "Corner bar diameter (mm)" "16")
+    ("dx" "X middle bar diameter (mm)" "16")
+    ("nx" "X bars per horizontal face (0 = none)" "2")
+    ("dy" "Y middle bar diameter (mm)" "16")
+    ("ny" "Y bars per vertical face (0 = none)" "2")
+    ("cover" "Clear cover to main bars (mm)" "50")))
+
+(defun ct:stirrup-dia (/ saved diameter)
+  (if (setq saved (getenv "CE_COLUMN_STIRRUP_MM"))
+    (setq diameter (distof saved 2)))
+  (if (and diameter (> diameter 0.0)) diameter 10.0))
+
+(defun ct:set-stirrup-size (/ diameter)
+  (initget 6)
+  (if (setq diameter (getreal (strcat "\nOuter stirrup diameter in mm <"
+                                      (rtos (ct:stirrup-dia) 2 4) ">: ")))
+    (setenv "CE_COLUMN_STIRRUP_MM" (vl-princ-to-string diameter)))
+  (prompt (strcat "\nOuter stirrup diameter: " (rtos (ct:stirrup-dia) 2 4) " mm."))
+  (princ))
+
+(defun ct:read-field (key / raw number)
+  (setq raw (vl-string-trim " " (get_tile key)))
+  (if (and (/= raw "") (not (wcmatch raw "*[~0-9.]*")))
+    (setq number (distof raw 2)))
+  (if (member key '("nx" "ny"))
+    (if (and number (<= 0 number 200) (= number (fix number))) (fix number))
+    (if (and number (> number 0.0)) number)))
+
+(defun ct:side-fits (pitch count corner-dia middle-dia)
+  (if (= count 0)
+    (> pitch corner-dia)
+    (and (> pitch (/ (+ corner-dia middle-dia) 2.0))
+         (or (= count 1) (> pitch middle-dia)))))
+
+(defun ct:bars (values / b h dc dx nx dy ny cover bundle corner px py offx offy i station shift sense bars)
+  (setq b (nth 0 values) h (nth 1 values) dc (nth 2 values)
+        nx (nth 4 values) ny (nth 6 values)
+        dx (if (= nx 0) dc (nth 3 values)) dy (if (= ny 0) dc (nth 5 values))
+        cover (nth 7 values) bundle (nth 8 values)
+        corner (+ cover (/ dc 2.0))
+        px (/ (- b (* 2.0 corner)) (1+ nx))
+        py (/ (- h (* 2.0 corner)) (1+ ny))
+        offx (+ cover (/ dx 2.0)) offy (+ cover (/ dy 2.0))
+        bars (list (list corner corner dc) (list (- b corner) corner dc)
+                   (list (- b corner) (- h corner) dc) (list corner (- h corner) dc))
+        i 1 shift (/ dx (sqrt 2.0)))
+  (repeat nx
+    (setq station (+ corner (* i px))
+          sense (if (< station (/ b 2.0)) -1.0 1.0)
+          bars (cons (list station offx dx) (cons (list station (- h offx) dx) bars)))
+    (if bundle
+      (setq bars (cons (list (+ station (* sense shift)) (+ offx shift) dx)
+                       (cons (list (+ station (* sense shift)) (- h offx shift) dx) bars))))
+    (setq i (1+ i)))
+  (setq i 1 shift (/ dy (sqrt 2.0)))
+  (repeat ny
+    (setq station (+ corner (* i py))
+          sense (if (< station (/ h 2.0)) -1.0 1.0)
+          bars (cons (list offy station dy) (cons (list (- b offy) station dy) bars)))
+    (if bundle
+      (setq bars (cons (list (+ offy shift) (+ station (* sense shift)) dy)
+                       (cons (list (- b offy shift) (+ station (* sense shift)) dy) bars))))
+    (setq i (1+ i)))
+  bars)
+
+(defun ct:bundle-fits (values / unsorted bars b h cover reach bar rest other radius rx ry valid)
+  (setq unsorted (ct:bars values)
+        bars (vl-sort unsorted
+               '(lambda (a b)
+                  (if (= (car a) (car b))
+                    (< (cadr a) (cadr b))
+                    (< (car a) (car b)))))
+        b (nth 0 values) h (nth 1 values) cover (nth 7 values)
+        reach (apply 'max (mapcar 'caddr unsorted))
+        valid (= (length bars) (length unsorted)))
+  (while (and valid bars)
+    (setq bar (car bars) bars (cdr bars)
+          radius (/ (caddr bar) 2.0) rx (car bar) ry (cadr bar)
+          rest bars)
+    (if (or (< (- rx radius) (- cover 1e-6)) (> (+ rx radius) (+ (- b cover) 1e-6))
+            (< (- ry radius) (- cover 1e-6)) (> (+ ry radius) (+ (- h cover) 1e-6)))
+      (setq valid nil))
+    (while (and valid rest (< (- (caar rest) rx) reach))
+      (setq other (car rest) rest (cdr rest))
+      (if (< (distance (list rx ry) (list (car other) (cadr other)))
+             (- (+ radius (/ (caddr other) 2.0)) 1e-6))
+        (setq valid nil))))
+  valid)
+
+(defun ct:validate (values tie / b h dc dx nx dy ny cover spanx spany)
+  (if (or (< (length values) 8)
+          (vl-some '(lambda (i) (null (nth i values))) '(0 1 2 4 6 7)))
+    "Enter positive dimensions and whole bar counts from 0 to 200."
+    (progn
+      (setq b (nth 0 values) h (nth 1 values) dc (nth 2 values)
+            dx (nth 3 values) nx (nth 4 values) dy (nth 5 values)
+            ny (nth 6 values) cover (nth 7 values)
+            spanx (- b (* 2.0 cover) dc) spany (- h (* 2.0 cover) dc))
+      (cond
+        ((and (> nx 0) (null dx)) "Enter a positive diameter for the X bars.")
+        ((and (> ny 0) (null dy)) "Enter a positive diameter for the Y bars.")
+        ((< cover tie)
+         (strcat "Cover to main bars must be at least " (rtos tie 2 4) " mm."))
+        ((or (<= spanx 0.0) (<= spany 0.0)) "The corner bars do not fit.")
+        ((or (and (> nx 0) (<= (- h (* 2.0 cover)) (* 2.0 dx)))
+             (and (> ny 0) (<= (- b (* 2.0 cover)) (* 2.0 dy))))
+         "Middle bars on opposite faces do not fit.")
+        ((not (ct:side-fits (/ spanx (1+ nx)) nx dc dx))
+         (if (= nx 0) "Corner bars overlap along X."
+           "X bars do not fit on the horizontal faces."))
+        ((not (ct:side-fits (/ spany (1+ ny)) ny dc dy))
+         (if (= ny 0) "Corner bars overlap along Y."
+           "Y bars do not fit on the vertical faces."))
+        ((and (> nx 0) (> ny 0)
+              (<= (distance (list (+ (/ dc 2.0) (/ spanx (1+ nx))) (/ dx 2.0))
+                            (list (/ dy 2.0) (+ (/ dc 2.0) (/ spany (1+ ny)))))
+                  (/ (+ dx dy) 2.0)))
+         "X and Y middle bars overlap near the corners.")
+        ((and (nth 8 values) (not (ct:bundle-fits values)))
+         "Bundled bars overlap or do not fit inside the cover.")))))
+
+(defun ct:accept (/ values message)
+  (setq values (append (mapcar '(lambda (field) (ct:read-field (car field))) ct:fields)
+                       (list (= (get_tile "bundle") "1")))
+        message (ct:validate values (ct:stirrup-dia)))
+  (if message
+    (set_tile "error" message)
+    (progn
+      (setq ct:dialog-result values)
+      (done_dialog 1))))
+
+(defun ct:remembered (index)
+  (if ct:last-values (nth index ct:last-values)))
+
+(defun ct:sync-diameters ()
+  (mode_tile "dx" (if (equal (ct:read-field "nx") 0) 1 0))
+  (mode_tile "dy" (if (equal (ct:read-field "ny") 0) 1 0)))
+
+(defun ct:dialog (/ path file id field index previous ct:dialog-result)
+  (setq path (vl-filename-mktemp "CEColumn" nil ".dcl")
+        file (open path "w"))
+  (if file
+    (progn
+      (write-line "ce_column : dialog { label = \"Generate Rectangular Column\";" file)
+      (foreach field ct:fields
+        (write-line
+          (strcat ": edit_box { key = \"" (car field) "\"; label = \"" (cadr field)
+                  "\"; edit_width = 12; edit_limit = 12; }") file))
+      (write-line ": toggle { key = \"bundle\"; label = \"Bundle middle bars (two touching bars)\"; }" file)
+      (write-line
+        (strcat ": text { label = \"Outer stirrup: " (rtos (ct:stirrup-dia) 2 4)
+                " mm. Change in Draw C-Link > StirrupSize.\"; }") file)
+      (write-line "errtile; ok_cancel; }" file)
+      (close file)
+      (setq id (load_dialog path))
+      (if (>= id 0)
+        (progn
+          (if (new_dialog "ce_column" id)
+            (progn
+              (setq index 0)
+              (foreach field ct:fields
+                (setq previous (ct:remembered index) index (1+ index))
+                (set_tile (car field) (if previous (vl-princ-to-string previous) (caddr field))))
+              (if (ct:remembered 8) (set_tile "bundle" "1"))
+              (ct:sync-diameters)
+              (action_tile "nx" "(ct:sync-diameters)")
+              (action_tile "ny" "(ct:sync-diameters)")
+              (action_tile "accept" "(ct:accept)")
+              (start_dialog))
+            (prompt "\nCould not open the Column Tools dialog."))
+          (unload_dialog id))
+        (prompt "\nCould not load the Column Tools dialog.")))
+    (prompt "\nCould not create the Column Tools dialog."))
+  (if (findfile path) (vl-file-delete path))
+  ct:dialog-result)
+
+(defun ct:layer (name color / data)
+  (setq data (tblsearch "LAYER" name))
+  (if data
+    (= 0 (logand 5 (cdr (assoc 70 data))))
+    (entmake (list '(0 . "LAYER") '(100 . "AcDbSymbolTableRecord")
+                   '(100 . "AcDbLayerTableRecord") (cons 2 name) '(70 . 0)
+                   (cons 62 color) '(6 . "Continuous")))))
+
+(defun ct:point (x y)
+  (trans (list (+ (car ct:origin) x) (+ (cadr ct:origin) y) (caddr ct:origin))
+         1 ct:normal))
+
+(defun ct:entity (data)
+  (if (entmake data)
+    (setq ct:made (cons (entlast) ct:made))
+    (setq ct:failed T)))
+
+(defun ct:poly (layer vertices closed / data v point)
+  (setq data (list '(0 . "LWPOLYLINE") '(100 . "AcDbEntity") (cons 8 layer)
+                   '(100 . "AcDbPolyline") (cons 90 (length vertices))
+                   (cons 70 (if closed 1 0))
+                   (cons 38 (caddr (ct:point 0.0 0.0))) (cons 210 ct:normal)))
+  (foreach v vertices
+    (setq point (ct:point (car v) (cadr v))
+          data (append data (list (list 10 (car point) (cadr point)) (cons 42 (caddr v))))))
+  (ct:entity data))
+
+(defun ct:draw-bar-at (center dia circle-layer hatch-layer / xy radius)
+  (setq xy (list 10 (car center) (cadr center))
+        radius (/ dia 2.0))
+  (ct:entity
+    (list '(0 . "HATCH") '(100 . "AcDbEntity") (cons 8 hatch-layer)
+          '(100 . "AcDbHatch") (list 10 0.0 0.0 (caddr center)) (cons 210 ct:normal)
+          '(2 . "SOLID") '(70 . 1) '(71 . 0) '(91 . 1)
+          '(92 . 1) '(93 . 2)
+          '(72 . 2) xy (cons 40 radius) '(50 . 0.0) (cons 51 pi) '(73 . 1)
+          '(72 . 2) xy (cons 40 radius) (cons 50 pi) (cons 51 (* 2.0 pi)) '(73 . 1)
+          '(97 . 0) '(75 . 0) '(76 . 1) '(98 . 0)))
+  (ct:entity (list '(0 . "CIRCLE") (cons 8 circle-layer)
+                   (cons 10 center) (cons 40 radius)
+                   (cons 210 ct:normal))))
+
+(defun ct:draw-bar (x y dia)
+  (ct:draw-bar-at (ct:point x y) dia "CE-COL-601-MAIN-BARS" "CE-COL-601-BAR-HATCH"))
+
+(defun c:POINTS2REBAR (/ *error* ss dia layer undo-group ct:made ct:failed ct:normal i center seen ent)
+  (defun *error* (msg)
+    (foreach ent ct:made (entdel ent))
+    (if undo-group (command-s "_.UNDO" "_End"))
+    (if (and msg (not (wcmatch (strcase msg) "*CANCEL*,*QUIT*,*EXIT*")))
+      (prompt (strcat "\nPoints to Rebar: " msg)))
+    (princ))
+  (setq ss (ssget "_I" '((0 . "POINT"))))
+  (if (not ss)
+    (progn
+      (prompt "\nWindow-select reinforcement POINTs and press Enter: ")
+      (setq ss (ssget '((0 . "POINT"))))))
+  (if ss
+    (progn
+      (initget 6)
+      (setq dia (getreal "\nRebar diameter in mm <16>: "))
+      (if (null dia) (setq dia 16.0))
+      (setq layer "EA-REBAR-SYMBOLS" ct:normal '(0.0 0.0 1.0) i 0)
+      (if (= 1 (logand 9 (getvar "UNDOCTL")))
+        (progn (command-s "_.UNDO" "_Begin") (setq undo-group T)))
+      (if (ct:layer layer 7)
+        (progn
+          (while (and (not ct:failed) (< i (sslength ss)))
+            (setq center (cdr (assoc 10 (entget (ssname ss i)))) i (1+ i))
+            (if (not (member center seen))
+              (progn
+                (setq seen (cons center seen))
+                (ct:draw-bar-at center dia layer layer))))
+          (if ct:failed
+            (*error* "Could not create all symbols. The new symbols were removed.")
+            (progn
+              (if undo-group (command-s "_.UNDO" "_End"))
+              (prompt (strcat "\nCreated " (itoa (length seen))
+                              " circle and SOLID hatch pairs on " layer ".")))))
+        (*error* "The EA-REBAR-SYMBOLS layer is locked, frozen, or unavailable.")))
+    (prompt "\nNo POINT entities selected."))
+  (princ))
+
+(defun ct:link (start end radius / span-length ux uy hook vertices)
+  ;; Same-side tails and semicircular ends as the supplied C-link.
+  (setq span-length (distance start end)
+        ux (/ (- (car end) (car start)) span-length)
+        uy (/ (- (cadr end) (cadr start)) span-length)
+        hook (if (> span-length 100.0) 50.0 (* 0.45 span-length))
+        vertices
+          (list (list radius (- span-length hook) 0.0)
+                (list radius span-length 1.0)
+                (list (- radius) span-length 0.0)
+                (list (- radius) 0.0 1.0)
+                (list radius 0.0 0.0)
+                (list radius hook 0.0))
+        vertices
+          (mapcar
+            '(lambda (v)
+               (list (+ (car start) (* uy (car v)) (* ux (cadr v)))
+                     (+ (cadr start) (* (- ux) (car v)) (* uy (cadr v)))
+                     (caddr v)))
+            vertices))
+  (ct:poly "CE-COL-601-C-LINK" vertices nil))
+
+(defun ct:outer-stirrup (xl xr yl yr rad / diagonal leg bend corner-bend)
+  ;; Continuous hoop with overlapping 135-degree hooks at the upper-right bar.
+  (setq diagonal (/ rad (sqrt 2.0)) leg (/ 50.0 (sqrt 2.0))
+        bend 0.414213562373095 corner-bend 0.668178637919299)
+  (ct:poly "CE-COL-601-STIRRUP"
+    (list (list (- (+ xr diagonal) leg) (- yr diagonal leg) 0.0)
+          (list (+ xr diagonal) (- yr diagonal) corner-bend)
+          (list xr (+ yr rad) 0.0) (list xl (+ yr rad) bend)
+          (list (- xl rad) yr 0.0) (list (- xl rad) yl bend)
+          (list xl (- yl rad) 0.0) (list xr (- yl rad) bend)
+          (list (+ xr rad) yl 0.0) (list (+ xr rad) yr corner-bend)
+          (list (- xr diagonal) (+ yr diagonal) 0.0)
+          (list (- xr diagonal leg) (- (+ yr diagonal) leg) 0.0))
+    nil))
+
+(defun ct:601-tick (/ name)
+  (setq name "CE-COL-601-TICK")
+  (if (not (tblsearch "BLOCK" name))
+    (if (entmake (list '(0 . "BLOCK") (cons 2 name) '(70 . 0) '(10 0.0 0.0 0.0)))
+      (progn
+        (entmake '((0 . "LWPOLYLINE") (100 . "AcDbEntity") (8 . "0")
+                   (62 . 0) (6 . "ByBlock") (100 . "AcDbPolyline")
+                   (90 . 2) (70 . 0) (43 . 0.15) (10 -0.5 -0.5) (10 0.5 0.5)))
+        (entmake '((0 . "ENDBLK"))))))
+  (cdr (assoc 330 (entget (tblobjname "BLOCK" name)))))
+
+(defun ct:601-dimstyle (/ font tick)
+  (or
+    (tblsearch "DIMSTYLE" "CE-COL-601")
+    (and
+      (or (tblsearch "STYLE" "CE-COL-601-ARIAL")
+          (entmake '((0 . "STYLE") (100 . "AcDbSymbolTableRecord")
+                     (100 . "AcDbTextStyleTableRecord") (2 . "CE-COL-601-ARIAL")
+                     (70 . 0) (40 . 0.0) (41 . 1.0) (50 . 0.0) (71 . 0)
+                     (42 . 2.25) (3 . "arial.ttf") (4 . ""))))
+      (setq font (tblobjname "STYLE" "CE-COL-601-ARIAL")
+            tick (ct:601-tick))
+      (entmake
+        (append
+          '((0 . "DIMSTYLE") (100 . "AcDbSymbolTableRecord")
+            (100 . "AcDbDimStyleTableRecord") (2 . "CE-COL-601") (70 . 0)
+            (40 . 25.0) (41 . 1.5) (42 . 1.0) (44 . 1.0) (46 . 1.0)
+            (73 . 0) (74 . 0) (77 . 1) (140 . 2.25) (141 . 1.0)
+            (144 . 1.0) (147 . 1.0) (172 . 1) (174 . 1)
+            (176 . 1) (177 . 1) (178 . 3) (271 . 0) (272 . 0) (277 . 2) (279 . 2))
+          (list (cons 340 font) (cons 342 tick)))))))
+
+(defun ct:601-dimension (p1 p2 dim-point rotation / ux direction)
+  (setq ux (trans '(1.0 0.0 0.0) 1 ct:normal T)
+        direction (+ (atan (cadr ux) (car ux)) rotation))
+  (ct:entity
+    (list '(0 . "DIMENSION") '(100 . "AcDbEntity") '(8 . "CE-COL-601-DIM")
+          '(100 . "AcDbDimension") '(70 . 32) '(1 . "") '(3 . "CE-COL-601")
+          (cons 10 (trans (apply 'ct:point dim-point) ct:normal 0))
+          (cons 210 ct:normal) '(100 . "AcDbAlignedDimension")
+          (cons 13 (trans (apply 'ct:point p1) ct:normal 0))
+          (cons 14 (trans (apply 'ct:point p2) ct:normal 0))
+          (cons 50 direction) '(100 . "AcDbRotatedDimension")))
+  (if (not ct:failed) (entupd (car ct:made))))
+
+(defun ct:draw (values ct:origin tie /
+                *error* ct:normal ct:made ct:failed undo-group
+                b h dc cover rad corner xl xr yl yr bars bar item)
+  (defun *error* (msg)
+    (foreach item ct:made (entdel item))
+    (if undo-group (command-s "_.UNDO" "_End"))
+    (if (and msg (not (wcmatch (strcase msg) "*CANCEL*,*QUIT*,*EXIT*")))
+      (prompt (strcat "\nColumn Tools: " msg)))
+    (princ))
+  (setq b (nth 0 values) h (nth 1 values) dc (nth 2 values)
+        cover (nth 7 values)
+        ct:normal (trans '(0.0 0.0 1.0) 1 0 T)
+        corner (+ cover (/ dc 2.0)) rad (/ (+ dc tie) 2.0)
+        xl corner xr (- b corner) yl corner yr (- h corner)
+        bars (ct:bars values))
+  (if (= 1 (logand 9 (getvar "UNDOCTL")))
+    (progn (command-s "_.UNDO" "_Begin") (setq undo-group T)))
+  (if (and (ct:layer "CE-COL-601-CONCRETE" 8) (ct:layer "CE-COL-601-MAIN-BARS" 7)
+           (ct:layer "CE-COL-601-STIRRUP" 8) (ct:layer "CE-COL-601-BAR-HATCH" 7)
+           (ct:layer "CE-COL-601-DIM" 1) (ct:601-dimstyle))
+    (progn
+      (ct:poly "CE-COL-601-CONCRETE" (list '(0.0 0.0 0.0) (list b 0.0 0.0)
+                                         (list b h 0.0) (list 0.0 h 0.0)) T)
+      (ct:outer-stirrup xl xr yl yr rad)
+      (foreach bar bars (apply 'ct:draw-bar bar))
+      (ct:601-dimension (list 0.0 h) (list b h) (list b (+ h 180.0)) 0.0)
+      (ct:601-dimension (list 0.0 h) '(0.0 0.0) '(-300.0 0.0) (/ pi 2.0)))
+    (progn
+      (setq ct:failed T)
+      (prompt "\nCould not prepare the 601 layers or dimension style.")))
+  (if ct:failed
+    (progn
+      (foreach item ct:made (entdel item))
+      (prompt "\nThe column could not be completed."))
+    (prompt (strcat "\nColumn drawn: " (itoa (length bars))
+                    " solid-hatched bars, 1 outer stirrup and 2 dimensions. Use CLINKDRAW for internal links.")))
+  (if undo-group (command-s "_.UNDO" "_End"))
+  (not ct:failed))
+
+(defun c:COLUMNDRAW (/ values origin)
+  (cond
+    ((= (getvar "CVPORT") 1) (prompt "\nSwitch to model space to draw the column."))
+    ((setq values (ct:dialog))
+     (setq ct:last-values values)
+     (if (setq origin (getpoint "\nPick the bottom-left corner of the column: "))
+       (ct:draw values origin (ct:stirrup-dia)))))
+  (princ))
+
+(defun ct:manual-link (ct:origin end bar-dia tie-dia / ct:normal ct:made ct:failed span)
+  (setq span (list (- (car end) (car ct:origin)) (- (cadr end) (cadr ct:origin))))
+  (cond
+    ((not (equal (caddr ct:origin) (caddr end) 1e-6))
+     (prompt "\nPick two bar centres in the same UCS plane.") nil)
+    ((<= (distance '(0.0 0.0) span) (+ bar-dia tie-dia))
+     (prompt "\nThe bar centres are too close for this C-link diameter.") nil)
+    ((not (ct:layer "CE-COL-601-C-LINK" 8))
+     (prompt "\nCheck that layer CE-COL-601-C-LINK is unlocked and thawed.") nil)
+    (T
+     (setq ct:normal (trans '(0.0 0.0 1.0) 1 0 T))
+     (ct:link '(0.0 0.0) span (/ (+ bar-dia tie-dia) 2.0))
+     (if ct:failed
+       (progn (prompt "\nCould not draw the C-link.") nil)
+       (progn (prompt "\nC-link drawn.") T)))))
+
+(defun c:CLINKDRAW (/ start end bar-dia tie-dia)
+  (cond
+    ((= (getvar "CVPORT") 1) (prompt "\nSwitch to model space to draw a C-link."))
+    ((equal (progn
+              (initget "StirrupSize")
+              (setq start (getpoint "\nPick first bar centre (use Center OSNAP) or [StirrupSize]: ")))
+            "StirrupSize")
+     (ct:set-stirrup-size))
+    ((and start (setq end (getpoint start "\nPick second bar centre: ")))
+     (setq bar-dia (cond (ct:last-clink-bar) ((ct:remembered 2)) (16.0))
+           tie-dia (cond (ct:last-clink-tie) (10.0)))
+     (initget 6)
+     (setq bar-dia (cond ((getreal (strcat "\nMain bar diameter at both ends <" (rtos bar-dia 2 2) ">: ")))
+                        (bar-dia)))
+     (initget 6)
+     (setq tie-dia (cond ((getreal (strcat "\nC-link diameter <" (rtos tie-dia 2 2) ">: ")))
+                        (tie-dia)))
+     (if (ct:manual-link start end bar-dia tie-dia)
+       (setq ct:last-clink-bar bar-dia ct:last-clink-tie tie-dia))))
+  (princ))
+
+(princ "\nColumn Tools 1.0.5 loaded. Commands: COLUMNDRAW, CLINKDRAW.")
+(princ)

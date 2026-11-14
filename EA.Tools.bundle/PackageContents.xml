@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ApplicationPackage SchemaVersion="1.0" AutodeskProduct="AutoCAD" ProductType="Application"
+                    AppVersion="1.0.5" ProductCode="{FF9B782C-F04C-475B-A54C-28283F9D2F56}"
+                    UpgradeCode="{1ADEA616-DC42-4BC2-807B-A9E9C77ED2C3}"
+                    Name="EA Tools" Description="PROKON transfer and column detailing tools">
+  <CompanyDetails Name="Engineering Alliance" />
+  <Components>
+    <RuntimeRequirements OS="Win64" Platform="AutoCAD*" SeriesMin="R24.0" SeriesMax="R24.0" />
+    <ComponentEntry AppName="EA Tools" AppType=".Net" Version="1.0.5"
+                    ModuleName="./Contents/Windows/EaTools.dll" LoadOnAutoCADStartup="True" />
+    <ComponentEntry AppName="EA Column Draw" AppType="Lisp" Version="1.0.5" PerDocument="True"
+                    ModuleName="./Contents/Lisp/ColumnTools.lsp" LoadOnAutoCADStartup="True" />
+  </Components>
+</ApplicationPackage>
